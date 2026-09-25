@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0E1B2C">
+<title>Fill Rate Report</title>
+<style>
+  :root{
+    --navy:#0E1B2C; --panel:#152640; --line:#233752; --gold:#E8A33D;
+    --text:#E7ECF3; --dim:#8EA0BC; --good:#4CC38A; --bad:#E15C5C;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--navy);color:var(--text);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:16px;}
+  h1{font-size:18px;margin:0 0 4px;}
+  .sub{color:var(--dim);font-size:12.5px;margin-bottom:16px;}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;}
+  .card .m{color:var(--gold);font-size:12px;font-weight:600;margin-bottom:6px;}
+  .card .row{display:flex;justify-content:space-between;font-size:12.5px;color:var(--dim);padding:2px 0;}
+  .card .row b{color:var(--text);font-weight:600;}
+  .fr-good{color:var(--good)!important;}
+  .fr-bad{color:var(--bad)!important;}
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+  .filters select, .filters input{
+    background:var(--panel);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:7px 10px;font-size:13px;
+  }
+  .filters input{flex:1;min-width:160px;}
+  .filters button{background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px;padding:7px 10px;font-size:12.5px;cursor:pointer;}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;}
+  table{border-collapse:collapse;width:100%;min-width:820px;}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12.5px;}
+  th{background:var(--panel);color:var(--dim);font-weight:600;position:sticky;top:0;cursor:pointer;user-select:none;}
+  th:hover{color:var(--text);}
+  tbody tr:hover{background:rgba(255,255,255,0.03);}
+  td.num, th.num{text-align:right;}
+  .status{padding:12px;color:var(--dim);font-size:13px;}
+  .err{color:var(--bad);}
+  .count{color:var(--dim);font-size:12px;margin:8px 0;}
+  .moreBtn{background:var(--panel);border:1px solid var(--line);color:var(--gold);border-radius:8px;padding:8px 14px;font-size:12.5px;cursor:pointer;width:100%;}
+  .moreBtn:hover{border-color:var(--gold);}
+</style>
+</head>
+<body>
+
+<h1>Fill Rate Report</h1>
+<div class="sub" id="subline">Loading…</div>
+
+<div class="cards" id="monthCards"></div>
+
+<div class="filters">
+  <select id="fCategory"><option value="">All Areas</option></select>
+  <select id="fChain"><option value="">All Chains</option></select>
+  <input id="fSearch" type="text" placeholder="Search customer or SO number…">
+  <button id="fClear">Clear filters</button>
+</div>
+
+<div class="count" id="rowCount"></div>
+<div class="tablewrap">
+  <table>
+    <thead>
+      <tr>
+        <th data-k="category">Area</th>
+        <th data-k="chain">Chain</th>
+        <th data-k="customer">Customer Name</th>
+        <th data-k="so">SO Number</th>
+        <th data-k="soDate">Sales Order Date</th>
+        <th data-k="delDate">Delivery Date</th>
+        <th class="num" data-k="order">Order</th>
+        <th class="num" data-k="delivered">Delivered</th>
+        <th class="num" data-k="fillRate">Fill Rate</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"><tr><td colspan="9" class="status">Loading data…</td></tr></tbody>
+  </table>
+</div>
+<div id="moreWrap" style="margin-top:10px;"></div>
+
+<script>
+// ====== CONFIG — edit these if sheet/tab/column layout changes ======
+const SHEET_ID   = '1oe54yVFp4-71SVpkpZGGVd5PkNlMc1hsFcuUyip9fRQ';
+const SALES_GID  = '0';
+const CUST_GID   = '438886906';
+
+const letterToIndex = s => s.split('').reduce((a,c)=>a*26+(c.charCodeAt(0)-64),0)-1;
+// Sales Report — only these columns are pulled over the wire (faster + avoids timeouts on large sheets)
+const SALES_COLS = ['B','D','E','F','I','J']; // SO, Customer, SO Date, Delivery Date, Order, Delivered
+const [SO_COL, CUSTOMER_COL, SODATE_COL, DELDATE_COL, ORDER_COL, DELIV_COL] = SALES_COLS.map((_,i)=>i);
+const SALES_QUERY = 'select ' + SALES_COLS.join(',');
+// Cust. Details — ASSUMPTION: customer name lookup key is column A. Change here if not.
+const CD_COLS = ['A','G','J']; // Name, Area, Chain
+const [CD_NAME_COL, CD_CATEGORY_COL, CD_CHAIN_COL] = CD_COLS.map((_,i)=>i);
+const CD_QUERY = 'select ' + CD_COLS.join(',');
+// =======================================================================
+
+let jsonpCounter = 0;
+function fetchSheetJSONP(sheetId, gid, query, timeoutMs=30000){
+  return new Promise((resolve, reject)=>{
+    const cbName = 'gvizCb_' + (jsonpCounter++);
+    let url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json;responseHandler:${cbName}&headers=0&gid=${encodeURIComponent(gid)}&_=${Date.now()}`;
+    if(query) url += `&tq=${encodeURIComponent(query)}`;
+    const script = document.createElement('script');
+    let done = false;
+    const cleanup = () => { delete window[cbName]; script.remove(); clearTimeout(timer); };
+    window[cbName] = (resp) => {
+      if(done) return; done = true; cleanup();
+      if(resp.status === 'error'){ reject(new Error((resp.errors&&resp.errors[0]&&resp.errors[0].detailed_message)||'Sheet error.')); return; }
+      resolve(resp);
+    };
+    const timer = setTimeout(()=>{ if(done) return; done=true; cleanup(); reject(new Error('Timed out waiting for the sheet — it may be large. Try reloading; if it keeps timing out, check the sheet is shared with "Anyone with the link".')); }, timeoutMs);
+    script.onerror = () => { if(done) return; done=true; cleanup(); reject(new Error('Could not reach Google Sheets.')); };
+    script.src = url;
+    document.head.appendChild(script);
+  });
+}
+function gvizRowsToArrays(resp){
+  return resp.table.rows.map(row => (row.c||[]).map(c => (c && c.v!==undefined && c.v!==null) ? c.v : ''));
+}
+function parseGvizDate(v){
+  if(v instanceof Date) return v;
+  if(typeof v === 'string' && v.startsWith('Date(')){
+    const p = v.slice(5,-1).split(',').map(Number);
+    return new Date(p[0], p[1], p[2]||1);
+  }
+  return null;
+}
+function fmtDate(d){ return d ? d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : ''; }
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const norm = s => String(s||'').trim().toUpperCase();
+
+let RECORDS = [];
+let sortKey = 'soDate', sortDir = -1;
+const PAGE_SIZE = 50;
+let visibleLimit = PAGE_SIZE;
+
+async function load(){
+  try{
+    const [salesResp, custResp] = await Promise.all([
+      fetchSheetJSONP(SHEET_ID, SALES_GID, SALES_QUERY),
+      fetchSheetJSONP(SHEET_ID, CUST_GID, CD_QUERY)
+    ]);
+    const salesRows = gvizRowsToArrays(salesResp);
+    const custRows = gvizRowsToArrays(custResp);
+
+    // Build customer -> {category, chain} lookup
+    const lookup = {};
+    custRows.forEach(r=>{
+      const name = norm(r[CD_NAME_COL]);
+      if(!name) return;
+      lookup[name] = { category: r[CD_CATEGORY_COL]||'', chain: r[CD_CHAIN_COL]||'' };
+    });
+
+    // Group sales rows by SO Number (line items -> one row per SO)
+    const groups = {};
+    salesRows.forEach(r=>{
+      const so = String(r[SO_COL]||'').trim();
+      const soDate = parseGvizDate(r[SODATE_COL]);
+      const customer = String(r[CUSTOMER_COL]||'').trim();
+      if(!so || !soDate || !customer) return; // skip header/blank rows
+      if(!groups[so]){
+        groups[so] = {
+          so, customer, soDate,
+          delDate: null,
+          order: 0, delivered: 0
+        };
+      }
+      // Delivery date can be blank on some line items for the same SO — use the
+      // first non-blank value found across all of the SO's lines.
+      if(!groups[so].delDate){
+        const d = parseGvizDate(r[DELDATE_COL]);
+        if(d) groups[so].delDate = d;
+      }
+      groups[so].order += Number(r[ORDER_COL]) || 0;
+      groups[so].delivered += Number(r[DELIV_COL]) || 0;
+    });
+
+    RECORDS = Object.values(groups).map(g=>{
+      const l = lookup[norm(g.customer)] || {};
+      return {
+        category: l.category || '(unmatched)',
+        chain: l.chain || '(unmatched)',
+        customer: g.customer, so: g.so, soDate: g.soDate, delDate: g.delDate,
+        order: g.order, delivered: g.delivered,
+        fillRate: g.order > 0 ? g.delivered / g.order : 0
+      };
+    });
+
+    populateFilters();
+    document.getElementById('subline').textContent = `${RECORDS.length} sales orders · updated ${new Date().toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`;
+    render();
+  }catch(err){
+    document.getElementById('tbody').innerHTML = `<tr><td colspan="9" class="status err">${err.message}</td></tr>`;
+    document.getElementById('subline').textContent = 'Failed to load.';
+  }
+}
+
+function populateFilters(){
+  const cats = [...new Set(RECORDS.map(r=>r.category))].sort();
+  const chains = [...new Set(RECORDS.map(r=>r.chain))].sort();
+  const fc = document.getElementById('fCategory'), fh = document.getElementById('fChain');
+  cats.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; fc.appendChild(o); });
+  chains.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; fh.appendChild(o); });
+}
+
+function getFiltered(){
+  const cat = document.getElementById('fCategory').value;
+  const chain = document.getElementById('fChain').value;
+  const q = norm(document.getElementById('fSearch').value);
+  return RECORDS.filter(r=>
+    (!cat || r.category===cat) &&
+    (!chain || r.chain===chain) &&
+    (!q || norm(r.customer).includes(q) || norm(r.so).includes(q))
+  );
+}
+
+function renderMonthCards(rows){
+  const byMonth = {};
+  rows.forEach(r=>{
+    const key = r.soDate.getFullYear()+'-'+r.soDate.getMonth();
+    if(!byMonth[key]) byMonth[key] = { label: MONTHS[r.soDate.getMonth()]+' '+r.soDate.getFullYear(), order:0, delivered:0, sortKey: key };
+    byMonth[key].order += r.order;
+    byMonth[key].delivered += r.delivered;
+  });
+  const months = Object.values(byMonth).sort((a,b)=> a.sortKey.localeCompare(b.sortKey)).slice(-3);
+  const el = document.getElementById('monthCards');
+  if(!months.length){ el.innerHTML = '<div class="status">No dated rows to summarize.</div>'; return; }
+  el.innerHTML = months.map(m=>{
+    const fr = m.order>0 ? m.delivered/m.order : 0;
+    const frClass = fr>=0.95 ? 'fr-good' : (fr<0.85 ? 'fr-bad' : '');
+    return `<div class="card">
+      <div class="m">${m.label}</div>
+      <div class="row"><span>Order</span><b>${m.order.toLocaleString()}</b></div>
+      <div class="row"><span>Delivered</span><b>${m.delivered.toLocaleString()}</b></div>
+      <div class="row"><span>Fill Rate</span><b class="${frClass}">${(fr*100).toFixed(1)}%</b></div>
+    </div>`;
+  }).join('');
+}
+
+function render(){
+  const rows = getFiltered();
+  renderMonthCards(rows);
+
+  rows.sort((a,b)=>{
+    let av=a[sortKey], bv=b[sortKey];
+    if(av instanceof Date) av=av.getTime();
+    if(bv instanceof Date) bv=bv.getTime();
+    if(typeof av==='string') return av.localeCompare(bv)*sortDir;
+    return (av-bv)*sortDir;
+  });
+
+  document.getElementById('rowCount').textContent = `Showing ${Math.min(visibleLimit, rows.length)} of ${rows.length} sales orders${rows.length!==RECORDS.length ? ' (filtered from '+RECORDS.length+')' : ''}`;
+  const tbody = document.getElementById('tbody');
+  const moreWrap = document.getElementById('moreWrap');
+  if(!rows.length){ tbody.innerHTML = '<tr><td colspan="9" class="status">No rows match the current filters.</td></tr>'; moreWrap.innerHTML=''; return; }
+
+  const visible = rows.slice(0, visibleLimit);
+  if(rows.length > visibleLimit){
+    moreWrap.innerHTML = `<button class="moreBtn" id="moreBtn">Show ${Math.min(PAGE_SIZE, rows.length-visibleLimit)} more (${rows.length-visibleLimit} remaining)</button>`;
+    document.getElementById('moreBtn').addEventListener('click', ()=>{ visibleLimit += PAGE_SIZE; render(); });
+  } else {
+    moreWrap.innerHTML = '';
+  }
+
+  tbody.innerHTML = visible.map(r=>{
+    const frClass = r.fillRate>=0.95 ? 'fr-good' : (r.fillRate<0.85 ? 'fr-bad' : '');
+    return `<tr>
+      <td>${r.category}</td><td>${r.chain}</td><td>${r.customer}</td><td>${r.so}</td>
+      <td>${fmtDate(r.soDate)}</td><td>${fmtDate(r.delDate)}</td>
+      <td class="num">${r.order.toLocaleString()}</td><td class="num">${r.delivered.toLocaleString()}</td>
+      <td class="num ${frClass}">${(r.fillRate*100).toFixed(1)}%</td>
+    </tr>`;
+  }).join('');
+}
+
+function resetLimitAndRender(){ visibleLimit = PAGE_SIZE; render(); }
+document.getElementById('fCategory').addEventListener('change', resetLimitAndRender);
+document.getElementById('fChain').addEventListener('change', resetLimitAndRender);
+document.getElementById('fSearch').addEventListener('input', resetLimitAndRender);
+document.getElementById('fClear').addEventListener('click', ()=>{
+  document.getElementById('fCategory').value='';
+  document.getElementById('fChain').value='';
+  document.getElementById('fSearch').value='';
+  resetLimitAndRender();
+});
+document.querySelectorAll('th[data-k]').forEach(th=>{
+  th.addEventListener('click', ()=>{
+    const k = th.dataset.k;
+    if(sortKey===k) sortDir *= -1; else { sortKey=k; sortDir=1; }
+    resetLimitAndRender();
+  });
+});
+
+load();
+</script>
+</body>
+</html>
